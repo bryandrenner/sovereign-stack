@@ -2,9 +2,14 @@
 
 *.json            text
 *.md              text
+*.ts              text
 
+.husky/pre-commit text
 .gitattributes    text
 .gitignore        text
 .editorconfig     text
+.npmrc            text
+.nvmrc            text
 
 .vscode/*.json    linguist-language=jsonc
+package-lock.json linguist-generated=true -merge
