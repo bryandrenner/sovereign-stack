@@ -40,15 +40,27 @@ This repository's dev setup is tuned for macOS, Bash, and Visual Studio Code. It
 
 **Run quick checks:**
 
+These checks run fast and are suitable to run frequently during development.
+
 ```sh
 npm test
 ```
 
-This includes type-checking.
+This includes type-checking and linting.
 
-<!-- TBD linting, unit testing, and checking Pulumi via `pulumi preview` -->
+<!-- TBD unit testing, and checking Pulumi via `pulumi preview` -->
 
-<!-- TBD a separate command for all checks, including slower-running tests and stricter CI-mode checks -->
+**Run all checks:**
+
+These checks are stricter and run more slowly and are suitable to run before pushing.
+
+```sh
+npm run test:all
+```
+
+This includes type-checking and stricter linting.
+
+<!-- TBD unit testing, integration/E2E testing, and checking Pulumi via `pulumi preview` -->
 
 ## Uncommon Tasks
 
@@ -80,7 +92,23 @@ It is recommended to upgrade Prettier _and reformats all files_ in a dedicated c
 npx tsc
 ```
 
-This is performed as a part of `npm test`.
+This is performed as a part of `npm test` and `npm run test:all`.
+
+**Lint:**
+
+```sh
+npx eslint
+```
+
+This is performed as a part of `npm test` and `npm run test:all`.
+
+Strict:
+
+```sh
+CI=true npx eslint --max-warnings 0
+```
+
+This is performed as a part of `npm run test:all`.
 
 **Check formatting:**
 

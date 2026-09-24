@@ -8,15 +8,22 @@
   },
   "scripts": {
     "prepare": "husky",
-    "test": "tsc"
+    "test": "tsc && eslint",
+    "test:all": "tsc && CI=true eslint --max-warnings 0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tsconfig/node26": "^26.0.1",
     "@types/node": "^26.6.2",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
     "husky": "^9.1.7",
+    "jiti": "^2.7.0",
     "lint-staged": "^17.5.1",
     "prettier": "3.9.9",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.1"
   },
   "lint-staged": {
     "**/*": "prettier --write --ignore-unknown"
