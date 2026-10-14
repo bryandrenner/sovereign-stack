@@ -1,8 +1,3 @@
----
-updated: 2026-10-13T10:25
-targetAudience: Bryan as the operator building sovereign-stack, and LLM agents helping him implement it
----
-
 # Upcoming increments
 
 These increments take `sovereign-stack` from an empty repository to its MVP. Each one is story-sized and ends in a behavior change someone can observe: an operator, a visitor, or a later increment. The steps under each increment are a starting checklist, not a contract.
@@ -59,24 +54,26 @@ Every increment up to [Dev asks for a password](#dev-asks-for-a-password) builds
 
 ### Pulumi runs from a fresh clone
 
-The operator can clone the repository, fill `secrets/` from the password manager, and run Pulumi against state stored in a versioned Scaleway bucket.
+The operator can clone the repository, fill `secrets/` from the password manager, and run Pulumi against dev's state, stored in a versioned Scaleway bucket in dev's own Scaleway project.
 
 **Done when:**
 
-- Running the wrapper (for example, `./pulumi network dev up`) succeeds on an empty `network` program, and the stack's state appears in the bucket.
+- Running the wrapper (for example, `./pulumi network dev up`) succeeds on an empty `network` program, and the stack's state appears in dev's bucket.
+- No global `pulumi login` is needed: the wrapper selects the backend from dev's deploy secrets alone.
 - Removing a required deploy secret makes the wrapper fail with an error naming the missing key, never its value.
-- Committing a fake secret is blocked by the pre-commit hook.
+- Committing a fake secret is blocked by the pre-commit hook, while the files in `secrets-example/` commit cleanly.
 
 **Steps:**
 
-1. In Scaleway, create the state bucket by hand and enable object versioning. Create an API key scoped to that bucket for Pulumi.
-2. Generate the Pulumi state passphrase and the SSH automation key pair. Store them, with the Scaleway key, in the password manager.
-3. Scaffold the repository: one `package.json`, TypeScript configuration, and the `layers/network` Pulumi project with an empty program. Add the other layers in the increments that need them.
-4. Add `secrets/` to `.gitignore`, and install gitleaks as a pre-commit hook.
-5. Write `secrets.schema.ts` with zod, declaring the deploy secrets so far: the passphrase (`PULUMI_CONFIG_PASSPHRASE`) and the state bucket's credentials (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). Add the matching `secrets.example/dev/deploy.env`.
-6. Write the `./pulumi` wrapper. It loads `secrets/<env>/deploy.env` if present without overriding variables already set, validates them against the schema, and runs Pulumi in the right layer and stack.
-7. Log in to the state backend with `pulumi login 's3://<bucket>?endpoint=s3.<region>.scw.cloud&region=<region>'`. Pulumi reads the bucket's credentials from the standard AWS variables above. Once it works, record the answer in the spec and remove it from the spec's open questions.
-8. Run `up` on the empty `network` dev stack and check the bucket.
+1. Choose the password manager that holds the root of trust. Record the choice in the spec and remove it from the spec's open decisions.
+2. In Scaleway, create a project for dev. In it, create dev's state bucket by hand and enable object versioning, then create an API key scoped to that project for Pulumi.
+3. Generate dev's Pulumi state passphrase and dev's SSH automation key pair. Store them, with the Scaleway key, in the password manager.
+4. Scaffold the repository: one `package.json`, TypeScript configuration, and the `layers/network` Pulumi project with an empty program. Add the other layers in the increments that need them. Keep dependencies few, and install them with `npm ci --ignore-scripts` where they allow it.
+5. Add `secrets/` to `.gitignore`, and install gitleaks as a pre-commit hook, with `secrets-example/` allowlisted.
+6. Write `secrets.schema.ts` with zod, declaring the deploy secrets so far: the backend URL (`PULUMI_BACKEND_URL`) with Scaleway's endpoint and region, the passphrase (`PULUMI_CONFIG_PASSPHRASE`), and the state bucket's credentials (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). Add the matching `secrets-example/dev/deploy.env`.
+7. Write the `./pulumi` wrapper. It loads only the selected environment's `secrets/<env>/deploy.env`, if present, without overriding variables already set, validates them against the schema, and runs Pulumi in the right layer and stack.
+8. Find the variables that point Pulumi's S3 backend at Scaleway, starting from `PULUMI_BACKEND_URL='s3://<bucket>?endpoint=s3.<region>.scw.cloud&region=<region>'`. Pulumi reads the bucket's credentials from the standard AWS variables above. Once it works, record the answer in the spec and remove it from the spec's open decisions.
+9. Run `up` on the empty `network` dev stack and check the bucket.
 
 ### The durable resources exist
 
@@ -91,7 +88,7 @@ Everything on dev that must outlive a server exists and is protected: `whoami.de
 
 **Steps:**
 
-1. Add a Hetzner project API token and a Cloudflare API token limited to editing DNS in the `drenner.me` zone to the deploy secrets, the schema, and the example file.
+1. Create a Hetzner project for dev and an API token for it. Add that token, and a Cloudflare API token limited to editing DNS in the `drenner.me` zone, to dev's deploy secrets, the schema, and the example file. The Cloudflare token is shared by both environments, because Cloudflare can't limit a token to individual records.
 2. Add a stack setting for the Hetzner location.
 3. In `network`, create one IPv4 and one IPv6 Primary IP in that location, unassigned, with automatic deletion off and `protect: true`.
 4. Create the firewall rules, applied by the label selector `env=<stack name>`.
@@ -107,7 +104,7 @@ The tailnet's access policy is code, and it lets the operator's devices SSH into
 
 - A pull request whose policy breaks a test can't be applied.
 - Merging to `main` applies the policy, and the admin console shows it.
-- Keys tagged `tag:dev` and `tag:prod` can be created through Tailscale's API.
+- Each environment's OAuth client can create keys tagged with its own environment's tag through Tailscale's API, and is refused the other environment's tag.
 
 **Steps:**
 
@@ -115,6 +112,7 @@ The tailnet's access policy is code, and it lets the operator's devices SSH into
 2. Define `tag:dev` and `tag:prod` and their owner, and an access rule letting Bryan's devices reach port 22 on both.
 3. Add `tests` that check the operator can reach both tags on port 22, and that neither tag can reach the operator's devices.
 4. Add Tailscale's GitOps action (`tailscale/gitops-acl-action`): test on pull requests, apply on pushes to `main`. Store its Tailscale credential in the repository's GitHub secrets.
+5. Create one OAuth client per environment, allowed to create keys only for that environment's tag. Store both in the password manager.
 
 ### The operator reaches a fresh server over the tailnet only
 
@@ -130,13 +128,13 @@ The tailnet's access policy is code, and it lets the operator's devices SSH into
 
 **Steps:**
 
-1. Add a Tailscale API credential that can create keys for both tags to the deploy secrets. Create the `hosts` project, reading the `network` and `storage` outputs through stack references.
+1. Add dev's Tailscale OAuth client to dev's deploy secrets. Create the `hosts` project, reading the `network` and `storage` outputs through stack references.
 2. Create a single-use, preauthorized join key tagged `tag:<stack name>`, with a short expiry (about an hour) and `recreateIfInvalid: 'never'`, so Pulumi keeps it after it's used or expires. It's needed only the first time the server joins; afterward the server's identity on the volume takes over.
-3. Render cloud-init from a typed template, and unit-test the rendering. It installs Podman with its rootless helpers (`uidmap`, `dbus-user-session`, `passt`), Caddy from Caddy's apt repository, Tailscale from Tailscale's apt repository, `rsync`, and unattended-upgrades. It creates `bryan` with a locked password, both SSH keys, and passwordless `sudo`, and disables password and root login.
+3. Render cloud-init from a typed template, and unit-test the rendering. It installs Podman with its rootless helpers (`uidmap`, `dbus-user-session`, `passt`), Caddy from Caddy's apt repository, Tailscale from Tailscale's apt repository, `rsync`, and unattended-upgrades. It creates `bryan` with a locked password, the personal SSH key and the environment's automation key, and passwordless `sudo`, and disables password and root login.
 4. In cloud-init, write the volume's fstab entry with `write_files`, using `nofail` and a generous `x-systemd.device-timeout` (several minutes), because the volume is attached only after the server exists. Create the mount point empty, owned by root, and read-only.
 5. Keep tailscaled's state on the volume, and make tailscaled wait for it with `RequiresMountsFor=`. Check how Debian's tailscaled unit sets its state path before choosing between a bind mount over `/var/lib/tailscale` and a drop-in that points tailscaled at the volume. Create the state directory when the volume is fresh.
 6. Run `tailscale up` with the join key from cloud-init. Confirm it succeeds with an already-used key when state already exists on the volume; if it doesn't, skip `tailscale up` when state exists.
-7. Register the automation public key as a Hetzner SSH key and pass it to the server. Without one, Hetzner emails a root password; with one, root's key is unusable anyway because root login is disabled.
+7. Register the environment's automation public key as a Hetzner SSH key and pass it to the server. Without one, Hetzner emails a root password; with one, root's key is unusable anyway because root login is disabled.
 8. Create the server from the stock Debian 13 image, with the label `env=<stack name>`, both Primary IPs, and a server type from stack configuration (the smallest CX type for now). Attach the volume.
 9. Export the server's ID and tailnet name.
 
@@ -175,7 +173,7 @@ From anywhere on the internet, `https://whoami.dev.drenner.me` answers with a tr
 1. Create the `services` project, reading `network`, `storage`, and `hosts` outputs through stack references.
 2. Render the Caddyfile with the global `email` and `storage file_system /mnt/data/caddy` options, and a site block for the environment's `whoami` hostname that uses `respond "sovereign-stack"`. Derive hostnames from the stack name: `<name>.dev.drenner.me` on dev, `<name>.drenner.me` on prod. Unit-test the rendering for both environments.
 3. Over SSH as `bryan`, create `/mnt/data/caddy` once, owned by the `caddy` user. Add a `caddy.service` drop-in with `RequiresMountsFor=/mnt/data`, so Caddy waits for the volume.
-4. Upload the Caddyfile to a staging directory named after its content hash, using `CopyToRemote`. Install it, validate it with `caddy validate`, and reload Caddy. Include the server's ID in `triggers`, and make any failure fail `pulumi up`.
+4. Send the Caddyfile on the install command's standard input, with the command's output logging turned off, rather than uploading it with `CopyToRemote`. It will hold a password hash on dev from [Dev asks for a password](#dev-asks-for-a-password) onward, and secrets never pass through uploaded files or command lines. Install it, validate it with `caddy validate`, and reload Caddy. Include the server's ID in `triggers`, and make any failure fail `pulumi up`.
 5. Expect the server to be still booting when Pulumi first connects: raise the connection's dial retries, and run `cloud-init status --wait` before anything else.
 
 > [!NOTE]
@@ -210,15 +208,16 @@ On dev, Caddy asks for a password before forwarding any request to a FOSS servic
 
 - `curl https://whoami.dev.drenner.me` without credentials gets a `401 Unauthorized`.
 - With credentials (`curl -u bryan:<password> …`), it prints the request's details, headed by `Name: sovereign-stack`.
-- The hash appears neither in Git nor in plaintext in Pulumi state.
+- The hash appears nowhere in Git, in plaintext in Pulumi state, in Pulumi's output, or on the server outside the installed Caddyfile.
+- The installed Caddyfile has mode `0640` and is owned by `root:caddy`.
 
 **Steps:**
 
 1. Choose the dev password, store it in the password manager, and hash it with `caddy hash-password`.
-2. Add `secrets/dev/platform.env` holding the hash, declared in the schema with a fake value in `secrets.example/dev/platform.env`.
+2. Add `secrets/dev/platform.env` holding the hash, declared in the schema with a fake value in `secrets-example/dev/platform.env`.
 3. In `services`, read the platform runtime secrets and wrap the hash in `pulumi.secret()`. The rendered Caddyfile then contains a secret, so wrap the Caddyfile in `pulumi.secret()` as well.
 4. Render a `basic_auth` block for FOSS services when the stack is `dev`, and none on prod. Extend the rendering tests to cover both.
-5. Install the Caddyfile readable only by root and the `caddy` group, since it now contains the hash.
+5. Install the Caddyfile with mode `0640`, owned by `root:caddy`, so workload users can't copy the hash and attack it offline.
 
 ### Prod only runs what dev ran
 
@@ -229,13 +228,15 @@ Pulumi refuses to update a prod stack with any commit that hasn't already been a
 - Running `up` on a prod stack fails with a clear message if the working tree has uncommitted changes, if the commit isn't pushed, or if the same layer's dev stack last ran a different commit.
 - Running `up` on the prod `network` stack with a commit that dev's `network` stack already ran succeeds.
 - `pulumi preview` on prod is never blocked.
+- Dev's credentials can't reach prod: dev's Scaleway key can't read prod's state bucket, and dev's Hetzner token can't see prod's resources.
 
 **Steps:**
 
 1. Have the wrapper pass the current commit to Pulumi, marked as dirty when the working tree has uncommitted changes. Each layer exports it as a `deployedCommit` output, through a shared helper in `lib/`.
-2. Before `up` on a prod stack, have the wrapper check that the working tree is clean, that the commit exists on the remote, and that `pulumi stack output deployedCommit` on the same layer's dev stack equals the current commit.
-3. Add `secrets/prod/deploy.env`, its example, and prod stack settings for `network`: the location.
-4. Promote the `network` layer: apply a commit to dev, then the same commit to prod. Check the prod Primary IPs, firewall, and `*.drenner.me` records.
+2. Before `up` on a prod stack, have the wrapper check that the working tree is clean, that the commit exists on the remote, and that `pulumi stack output deployedCommit` on the same layer's dev stack equals the current commit. Dev's state lives in dev's bucket, so read it in a separate process whose environment holds only dev's deploy secrets, never prod's.
+3. Bootstrap prod's credentials as the first increments did for dev: a Scaleway project with its own versioned state bucket and API key, a passphrase, an SSH automation key pair, and a Hetzner project and token. Reuse the shared Cloudflare token. Store them all in the password manager.
+4. Add `secrets/prod/deploy.env`, its example, and prod stack settings for `network`: the location.
+5. Promote the `network` layer: apply a commit to dev, then the same commit to prod. Check the prod Primary IPs, firewall, and `*.drenner.me` records.
 
 ### Prod serves whoami publicly
 
@@ -249,7 +250,7 @@ All four prod stacks run the commit that dev ran, and `https://whoami.drenner.me
 
 **Steps:**
 
-1. Add the prod stack settings for `storage`, `hosts`, and `services`. No prod platform secrets are needed yet, because prod has no basic authentication.
+1. Add prod's Tailscale OAuth client to prod's deploy secrets, and the prod stack settings for `storage`, `hosts`, and `services`. No prod platform secrets are needed yet, because prod has no basic authentication.
 2. Promote each layer in order (`storage`, `hosts`, `services`), checking each before the next.
 3. Repeat the checks from earlier increments that apply to prod: SSH over the tailnet only, the volume mounted with tailscaled's state on it, and a second `pulumi up` changing nothing.
 
@@ -274,8 +275,8 @@ The operator can rebuild either environment by following a short written procedu
 These parts of the spec come later, each in its own increment or epic:
 
 - Staggered FOSS image updates and staggered reboot windows (dev before prod).
-- Runtime secrets for individual workloads.
-- First-party workloads: the `drenner.dev` wildcard records, the deploy script, environment tags and tag-based promotion, forced-command CI keys, `tag:ci` tailnet access, and the reusable deploy workflow.
+- Runtime secrets for individual workloads, delivered on standard input, with the workload restarted when they change.
+- First-party workloads: the `drenner.dev` wildcard records, the deploy script and its check for required secret names (`deploy/secrets.keys`), environment tags and tag-based promotion, forced-command CI keys, `tag:ci` tailnet access, and the reusable deploy workflow.
 - Backups, database dumps, and restore drills. Backups should exclude tailscaled's state on the volume.
 - Podman auto-update and health checks.
 - Break-glass SSH through the firewall.

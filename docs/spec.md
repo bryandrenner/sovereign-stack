@@ -55,8 +55,8 @@ Other terms used throughout:
 - **Disposable compute, durable state.** Servers can be destroyed and rebuilt from code at any time. Anything irreplaceable (data volumes, public IP addresses, backups, Pulumi state) lives in separate, protected resources.
 - **Everything as code.** Nothing is configured by hand on a server. If a change isn't in a repository, it doesn't exist. The only exceptions are documented bootstrap steps and break-glass debugging.
 - **Git is the source of desired state.** What each environment should run is recorded in Git: FOSS services in this repository, and first-party workloads in their own repositories' environment tags. A rebuilt server converges to Git without any CI run.
-- **Least privilege.** Every workload runs as its own unprivileged user in rootless containers, each first-party CI key can run only the deploy script, and SSH isn't reachable from the public internet.
-- **No secrets in any repository, encrypted or not.** Repositories declare which secrets exist. The values arrive as environment variables or git-ignored files at deploy time, from wherever the operator keeps them.
+- **Least privilege.** Every workload runs as its own unprivileged user in rootless containers, each first-party CI key can run only the deploy script, each environment's credentials reach only that environment, and SSH isn't reachable from the public internet.
+- **No secrets in any repository, encrypted or not.** Repositories declare which secrets exist. The values arrive as environment variables or git-ignored files at deploy time, pulled from the operator's password manager. Committed ciphertext can never be removed from Git history, and in a public repository anyone could attack its key offline indefinitely. This departs from Pulumi's own default; see [Secrets](#secrets).
 - **Dev first, then promote.** Every change lands in dev. Prod runs a commit only after it has run on dev. For first-party workloads, moving a repository's `prod` tag is the promotion step.
 - **Build once, deploy many.** Every commit on `main` builds exactly one image, tagged with the commit's full SHA, so a commit identifies its image without any extra record. Promotion reuses that exact image and never rebuilds it.
 - **Idempotent.** Running a deployment twice changes nothing the second time. The deploy script does nothing when a workload's commit, configuration, and Quadlets are unchanged. The one deliberate exception is a FOSS service tracking a moving image tag: when the tag points at a newer image, the running service changes without a code change. See [Keeping FOSS images up to date](#keeping-foss-images-up-to-date).
@@ -77,6 +77,8 @@ Other terms used throughout:
 - **Host reverse proxy with localhost-published containers.** Caddy runs directly on the host and forwards each hostname to a container port bound to `127.0.0.1`. See [Routing and port allocation](#routing-and-port-allocation).
 - **Sidecar databases.** Each workload that needs a database runs its own database container alongside it.
 - **Secrets as environment, from outside the repository.** The operator supplies secrets as git-ignored env files or environment variables. Their source of truth is an independent password manager, plus an offline backup. See [Secrets](#secrets).
+- **Credentials scoped per environment.** Dev and prod use separate cloud projects, keys, and passphrases, so dev's credentials can't touch prod. See [Scoping credentials per environment](#scoping-credentials-per-environment).
+- **Secrets on standard input.** Secret values travel over SSH on a command's standard input, never in its arguments or in uploaded files.
 - **Commit-SHA images, Git tags for environments.** Images are tagged only `sha-<full commit SHA>` and never re-tagged. Environments are Git tags on commits.
 - **Tracking major versions for FOSS images.** FOSS services follow a major-version tag and apply minor updates automatically. Major upgrades are deliberate code changes.
 - **Single-use bootstrap credentials.** A new server joins the tailnet with a key that's worthless after first use.
@@ -87,6 +89,8 @@ Other terms used throughout:
 
 - **Secrets in cloud-init `userData`.** Hetzner stores `userData` and serves it from a metadata endpoint that any process on the server can read, including containers. Changing it also forces a server rebuild. **Instead:** `userData` holds only non-secret, rarely changing setup. Secrets arrive over SSH after boot. The single-use tailnet key is the one exception, because it's worthless once used.
 - **Leaking secrets into Pulumi state.** Pulumi records every resource input in its state file. A secret value passed to a resource without `pulumi.secret()` is stored in plaintext. **Instead:** wrap every secret with `pulumi.secret()` before it reaches a resource.
+- **Secrets in command lines.** Any user on a Linux server can read every running process's arguments through `/proc`, and Pulumi logs remote commands' output by default. **Instead:** send secret values on the command's standard input, and turn off output logging for commands that handle them.
+- **Sharing credentials between environments.** A token that reaches both environments lets a dev mistake or a leaked dev credential damage prod, which defeats the point of having dev. **Instead:** give each environment its own cloud projects, keys, and passphrase.
 - **Workload-level changes through cloud-init.** Editing `userData` to add a user or change a service replaces the whole server. **Instead:** cloud-init covers only the base node. Workload users, files, and services are delivered afterward.
 - **Hand-editing the server.** Manual changes drift from the code, are invisible to Pulumi, and vanish at the next rebuild. **Instead:** change the repository and redeploy. When debugging by hand, encode what you learned before moving on.
 - **Tying data to a server's lifecycle.** A volume defined alongside its server can be destroyed when the server is replaced. **Instead:** volumes and IPs live in lower layers and use Pulumi's `protect: true`.
@@ -183,7 +187,7 @@ Some chosen FOSS tools are controlled by a single company. They're used for prag
 
 ## Environments
 
-There are two environments, each with its own server and its own Pulumi stacks. Each server is sized to what its environment actually runs.
+There are two environments, each with its own server, its own Pulumi stacks, and its own credentials (see [Scoping credentials per environment](#scoping-credentials-per-environment)). Each server is sized to what its environment actually runs.
 
 | Environment | FOSS services           | Apps                     | Experiments              | Data                      |
 | ----------- | ----------------------- | ------------------------ | ------------------------ | ------------------------- |
@@ -253,7 +257,7 @@ The Tailscale access policy sits outside the layers, in its own repository. See 
 - **Block volumes.** One per environment, protected from deletion. See [Storage layout](#storage-layout).
 - **Backup bucket.** A Scaleway Object Storage bucket for prod backups.
 
-The Pulumi state bucket is deliberately not managed here. Pulumi needs it to exist before it can run at all, so it's created once by hand. See [Pulumi state and deployment](#pulumi-state-and-deployment).
+The Pulumi state buckets are deliberately not managed here. Pulumi needs a state bucket to exist before it can run at all, so each is created once by hand. See [Pulumi state and deployment](#pulumi-state-and-deployment).
 
 ### Hosts
 
@@ -307,12 +311,12 @@ sovereign-stack/
 │       └── deploy.yml    # Reusable workflow first-party repositories call
 ├── lib/                  # Shared TypeScript: types, naming, host conventions
 ├── secrets.schema.ts     # Which secrets exist, per environment and workload, validated with zod
-├── secrets.example/      # Fake values showing each file's expected shape
 ├── secrets/              # Git-ignored; filled by the operator
+├── secrets-example/      # Fake values showing each file's expected shape
 ├── docs/
 │   └── spec.md
 ├── package.json          # One package shared by all four projects
-└── pulumi                # Wrapper: loads deploy secrets, then runs Pulumi
+└── pulumi                # Wrapper: loads one environment's deploy secrets, then runs Pulumi
 ```
 
 ## Pulumi state and deployment
@@ -326,12 +330,12 @@ sovereign-stack/
 | ----------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------- |
 | Pulumi Cloud                              | Pulumi's default, with a web UI                    | Closed-source service; excluded                             |
 | Local files on the laptop                 | Zero setup                                         | Lost with the laptop; not usable from another machine or CI |
-| **S3-compatible object storage (chosen)** | Reachable from any machine or CI; versioned; cheap | One manual bootstrap step to create the bucket              |
+| **S3-compatible object storage (chosen)** | Reachable from any machine or CI; versioned; cheap | One manual bootstrap step to create each bucket             |
 | Committed to Git                          | Versioned for free                                 | Merge conflicts; no locking; easy to leak secrets           |
 
-**Decision.** State lives in a Scaleway Object Storage bucket, separate from Hetzner, with object versioning enabled so every previous state is recoverable. Keeping state off Hetzner means that even losing the Hetzner account leaves a complete map of what existed. The bucket is created once by hand, because Pulumi can't manage the bucket that holds its own state.
+**Decision.** State lives in Scaleway Object Storage, separate from Hetzner, in one bucket per environment. Each bucket sits in its environment's Scaleway project and has object versioning enabled, so every previous state is recoverable. Keeping state off Hetzner means that even losing the Hetzner account leaves a complete map of what existed. Each bucket is created once by hand, because Pulumi can't manage the bucket that holds its own state.
 
-- **Login:** `pulumi login 's3://<bucket-name>'`, with Scaleway's endpoint and region supplied through the wrapper's environment.
+- **Backend selection:** each environment's `deploy.env` sets `PULUMI_BACKEND_URL` to `s3://<bucket-name>`, along with Scaleway's endpoint and region, so there's no global `pulumi login` and one environment's commands can't reach the other's state.
 - **Locking:** Pulumi locks a stack in a self-managed backend during an update, but the lock isn't transactional. If an update dies uncleanly, the stale lock must be removed by hand before the next run.
 
 > [!collab] Verify the Scaleway endpoint
@@ -339,13 +343,17 @@ sovereign-stack/
 
 ### The root of trust
 
-Pulumi encrypts secrets in its state using a **passphrase**. That passphrase, the state bucket credentials, the provider API tokens (Hetzner, Cloudflare, Scaleway, Tailscale), the SSH automation private key, and a read-only GitHub token (see [Private repositories](#private-repositories)) are the **deploy secrets**. The `./pulumi` wrapper loads `secrets/<env>/deploy.env` into the environment if the file exists, then runs Pulumi. Variables already set in the environment take precedence, so a secrets manager's command-line tool can inject values instead of a file.
+Pulumi encrypts secrets in its state using a **passphrase**. Each environment has its own passphrase, shared by that environment's four stacks so stack references can read each other's secret outputs.
+
+Pulumi state holds an encrypted copy of every secret the platform delivers. An environment's passphrase plus its state bucket credentials therefore unlock all of that environment's secrets, which makes them the most valuable values the operator holds.
+
+That passphrase, the state bucket credentials, the provider API tokens (Hetzner, Cloudflare, Scaleway, Tailscale), the environment's SSH automation private key, and a read-only GitHub token (see [Private repositories](#private-repositories)) are the environment's **deploy secrets**. The `./pulumi` wrapper loads only the selected environment's `secrets/<env>/deploy.env` into the environment, if the file exists, then runs Pulumi. Variables already set in the environment take precedence, so a secrets manager's command-line tool can inject values instead of a file.
 
 **Working from a new machine:**
 
 1. Install the tools (Node and Pulumi).
 2. Clone `sovereign-stack`, then fill `secrets/` from the password manager.
-3. Log in to the state backend and select a stack.
+3. Select a stack. The wrapper points Pulumi at that environment's state bucket.
 
 ### Deploying from CI later
 
@@ -358,7 +366,7 @@ Deploying `sovereign-stack` from CI would need only two things: the secrets as e
 `sovereign-stack` defines **which** secrets exist, never where their values come from:
 
 - `secrets.schema.ts` declares every deploy secret and runtime secret, per environment and per workload, and validates what's supplied. Validation errors name the missing or malformed key, never the value.
-- `secrets.example/` shows each file's expected shape with fake values.
+- `secrets-example/` shows each file's expected shape with fake values.
 
 ### Where secret values come from
 
@@ -379,29 +387,59 @@ Naming each runtime file after its workload's Unix user makes delivery a one-to-
 
 **Source of truth.** An independent password manager, plus an offline backup. It must not be a service hosted on this platform, such as its own Vaultwarden.
 
-**Scaleway API keys** are created by hand, once, and scoped narrowly: one for Pulumi (the state bucket and the backup bucket's creation), one for restic to write backups, and one for Generative APIs. The Generative APIs key is a runtime secret of the self-hosted chat interface, such as Open WebUI. Pulumi doesn't manage any of them.
+### Scoping credentials per environment
+
+Each environment's credentials reach only that environment, so a mistake or a leaked credential in dev can't damage prod.
+
+| Credential           | Scope                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| Hetzner API token    | One Hetzner project per environment; a token reaches only its own project                |
+| Scaleway API keys    | One Scaleway project per environment, holding that environment's state bucket            |
+| Pulumi passphrase    | One per environment                                                                      |
+| SSH automation key   | One key pair per environment, authorized only on that environment's server               |
+| Tailscale            | One OAuth client per environment, allowed to create keys only for that environment's tag |
+| GitHub token         | Shared; it can only read                                                                 |
+| Cloudflare API token | Shared; see below                                                                        |
+
+**Scaleway API keys** are created by hand, once per environment, scoped to that environment's project: one for Pulumi (the state bucket, and on prod the backup bucket's creation), one for restic to write prod backups, and one for Generative APIs in each environment that runs the chat interface. The Generative APIs key is a runtime secret of the self-hosted chat interface, such as Open WebUI. Pulumi doesn't manage any of them.
+
+**Cloudflare** tokens can be limited to zones but not to individual records, and both environments' records live in the same two zones. A dev token can therefore edit prod's DNS records. That's accepted: the records are few, change rarely, and the `network` layer restores them from code.
 
 ### How secrets reach workloads
 
 - **Deploy secrets.** The `./pulumi` wrapper loads them as environment variables.
-- **Runtime secrets, for FOSS services and first-party workloads alike.** The `services` layer reads each workload's file, wraps every value in `pulumi.secret()`, and writes it over SSH, as that workload's user, to `~/.config/secrets/runtime.env` with mode `0600`. Quadlets read it through `EnvironmentFile=`.
-- **The deploy script never touches secrets.** They're already on the server, and Pulumi redelivers them to a rebuilt server.
-- **Ordering.** Adding a secret to a first-party workload requires a `sovereign-stack` deploy before the workload's deploy that uses it.
+- **Runtime secrets, for FOSS services and first-party workloads alike.** The `services` layer reads each workload's file, wraps every value in `pulumi.secret()`, and sends the file's content over SSH, as that workload's user, on a remote command's standard input. The command writes `~/.config/secrets/runtime.env` with mode `0600`, and its output logging is off. Quadlets read the file through `EnvironmentFile=`. Secrets never pass through `CopyToRemote`, a staging directory, or a command's arguments.
+- **Restart on change.** When a workload's runtime secrets change, the `services` layer restarts the workload's services with `systemctl --user try-restart`, which restarts only services that are running. The change is detected with a hash of the file's content, itself wrapped in `pulumi.secret()`. Rotating a secret therefore takes effect without a workload deploy.
+- **The deploy script never reads secret values.** They're already on the server, and Pulumi redelivers them to a rebuilt server. The script only checks that the key names a workload requires are present. See [The deploy script](#the-deploy-script).
+- **Ordering.** Adding a secret to a first-party workload requires a `sovereign-stack` deploy before the workload's deploy that uses it. If the order is wrong, the deploy script fails before restarting anything and names the missing keys.
 
-Plaintext never touches Git, `userData`, or unencrypted Pulumi state.
+Plaintext never touches Git, `userData`, command lines, or unencrypted Pulumi state.
+
+### Delivering secrets into containers
+
+**Decision.** Containers receive runtime secrets as environment variables, from `runtime.env` through `EnvironmentFile=`.
+
+| Option                             | Pros                                                                                                            | Cons                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Environment file (chosen)**      | The most common convention; works with every image; one file per workload                                       | Variables are inherited by child processes, visible in `podman inspect`, and included in environment dumps |
+| Podman secrets (Quadlet `Secret=`) | Can mount secrets as files for images that read `*_FILE` variables, such as Postgres's `POSTGRES_PASSWORD_FILE` | Each change must be applied with `podman secret`; not every image can read secrets from files              |
+
+Switching later changes only the Quadlet templates and the delivery command, not workloads.
 
 ### Risks
 
 - **Plaintext at rest on the operator's machine.** Require full-disk encryption and mode `0600` on everything in `secrets/`.
-- **Human error.** Accidentally committing a secrets file is the most likely leak. Keep `secrets/` in `.gitignore`, and run gitleaks (FOSS) as a pre-commit hook and CI check.
-- **Losing the state passphrase.** Pulumi state holds secret values encrypted with the passphrase, so losing it makes state unreadable. The passphrase belongs in the password manager with everything else.
-- **A leaked secret stays leaked.** Rotation is manual: change the value at its source, update the password manager, and redeploy.
+- **Malicious dependencies.** The Pulumi projects run npm packages with an environment's deploy secrets in their environment, and any process running as the operator can read `secrets/`. A compromised package in the dependency tree is the most likely way the whole platform gets compromised. Keep the projects' dependencies few, install them with `npm ci --ignore-scripts` where the dependencies allow it, and review lockfile changes.
+- **Human error.** Accidentally committing a secrets file is the most likely leak. Keep `secrets/` in `.gitignore`, and run gitleaks (FOSS) as a pre-commit hook and CI check, with `secrets-example/` allowlisted.
+- **Losing a state passphrase.** Pulumi state holds secret values encrypted with the environment's passphrase, so losing it makes that environment's state unreadable. The passphrases belong in the password manager with everything else.
+- **A leaked secret stays leaked.** Rotation is manual: change the value at its source, update the password manager, and redeploy the `services` layer, which restarts the affected workloads.
 
 ### Alternatives
 
 | Option                                                     | Pros                                                                                  | Cons                                                                                                |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | **Git-ignored env files from a password manager (chosen)** | No secrets in any repository; works with any secrets source; the most common approach | Plaintext on the operator's disk; a manual step on each new machine                                 |
+| Pulumi config secrets (`pulumi config set --secret`)       | Pulumi's built-in, vanilla approach; versioned with code                              | Ciphertext in Git forever; in a public repository, anyone can attack the passphrase offline         |
 | SOPS + Age files in the repository                         | Versioned and reviewed with code                                                      | Ciphertext and secret names in Git forever; secrets don't belong in repositories, even encrypted    |
 | SOPS + Age files kept outside the repository               | Encrypted at rest                                                                     | Extra tools and key management with no benefit once files never enter Git                           |
 | Per-repository GitHub Actions secrets                      | Built into CI                                                                         | Unusable for `pulumi up` from a laptop; environments unavailable for private repos on the Free plan |
@@ -445,7 +483,7 @@ Fedora CoreOS isn't offered as a stock Hetzner image and would need a custom upl
 cloud-init is responsible for:
 
 - **Packages:** Podman and its rootless helpers (such as `uidmap`, `dbus-user-session`, and `passt`), Caddy from Caddy's official apt repository, Tailscale from Tailscale's apt repository, restic, rsync, and unattended-upgrades.
-- **The admin account:** `bryan`, with a locked password, SSH keys (a personal key plus an automation key for Pulumi), and passwordless `sudo`.
+- **The admin account:** `bryan`, with a locked password, SSH keys (a personal key plus the environment's automation key for Pulumi), and passwordless `sudo`.
 - **SSH hardening:** key-only login and no root login.
 - **The data volume's fstab entry and mount point.** See [Storage layout](#storage-layout).
 - **Automatic security updates:** unattended-upgrades configuration.
@@ -484,7 +522,7 @@ cloud-init is **not** responsible for workload users, services, Caddy site confi
 - Each workload in the manifest has a **stable numeric ID** that's never reused. Its Unix UID and its sub-UID range are derived from that ID, so ranges never overlap and never shift when the manifest changes. A rebuilt server recreates each user with the same UID, so the files on the volume still belong to the right user.
 - Sub-UID ranges are assigned explicitly (`usermod --add-subuids`), rather than trusting `useradd` to choose them.
 - Lingering is enabled with `loginctl enable-linger`, which takes effect immediately, so the user's services run at boot without a login.
-- Each user's `authorized_keys` holds Pulumi's automation key and, for first-party workloads, the workload's CI key restricted to the deploy script. See [The deploy script](#the-deploy-script).
+- Each user's `authorized_keys` holds the environment's automation key and, for first-party workloads, the workload's CI key restricted to the deploy script. See [The deploy script](#the-deploy-script).
 
 **How Pulumi acts as a workload user.** Pulumi SSHes in _as_ each workload user to install Quadlets, write secrets, and restart services. It never uses `sudo -u`, which can't manage another user's services.
 
@@ -725,7 +763,7 @@ Health checks are a deliberate fast-follow. The manifest and Quadlet templates a
 
 The `services` layer deploys FOSS services from Bryan's machine, connecting over the tailnet as each service's own user (`foss-<name>`):
 
-1. Render each service's Quadlet files, configuration files, and runtime secrets from the manifest and `foss-services/<name>/`.
+1. Render each service's Quadlet files and configuration files from the manifest and `foss-services/<name>/`. These contain no secret values; services read secrets from environment variables, delivered separately. See [How secrets reach workloads](#how-secrets-reach-workloads).
 2. Upload them to a staging directory named after a hash of their content, using Pulumi's `CopyToRemote` resource.
 3. Copy the staging directory into place with `rsync --delete`, so files removed from the repository are also removed from the server.
 4. Run `systemctl --user daemon-reload` and restart only the services whose files changed.
@@ -822,6 +860,8 @@ demo-experiment.dev.drenner.dev {
 }
 ```
 
+The Caddyfile contains password hashes, so it's installed with mode `0640`, owned by `root:caddy`. Caddy can read it, but workload users can't copy the hashes and attack them offline.
+
 **Port allocation.** The manifest assigns each workload a fixed host port, unique across the server. Ports can be derived from each workload's stable ID, or assigned by hand within ranges per workload kind.
 
 | Option                                           | Pros                                           | Cons                                                        |
@@ -876,9 +916,9 @@ Dev isn't backed up. Hetzner's own automatic backups cover only a server's root 
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | A server                  | `pulumi up` on the `hosts` and `services` layers, which also runs `deploy` for every first-party workload in the manifest |
 | The data volume           | The latest restic snapshot                                                                                                |
-| Pulumi state              | A previous version in the versioned state bucket                                                                          |
+| Pulumi state              | A previous version in the environment's versioned state bucket                                                            |
 | Secrets                   | The password manager, or its offline backup                                                                               |
-| Bryan's laptop            | Clone the repositories, refill `secrets/` from the password manager, log in to the state backend                          |
+| Bryan's laptop            | Clone the repositories, refill `secrets/` from the password manager, and select a stack                                   |
 | The whole Hetzner account | State, backups, and code all live elsewhere; rebuild at any provider                                                      |
 
 ## Observability
@@ -899,15 +939,15 @@ This section defines the agreement between `sovereign-stack` and each app or exp
 
 ### Ownership
 
-| Owner                     | Owns                                                                                                                               |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `sovereign-stack`         | The workload's shape: Unix user, port, Quadlets (including any sidecar database), Caddy route, data directory, and runtime secrets |
-| The workload's repository | Its code and image; which commit each environment runs (the `dev` and `prod` tags); non-secret configuration at that commit        |
-| The server                | The deploy script, which makes the running workload match the repository's environment tag                                         |
+| Owner                     | Owns                                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sovereign-stack`         | The workload's shape: Unix user, port, Quadlets (including any sidecar database), Caddy route, data directory, and runtime secrets                    |
+| The workload's repository | Its code and image; which commit each environment runs (the `dev` and `prod` tags); non-secret configuration and required secret names at that commit |
+| The server                | The deploy script, which makes the running workload match the repository's environment tag                                                            |
 
 ### End-to-end flow
 
-1. Bryan adds the workload to the manifest, adds its secrets file, and runs `pulumi up` on the `services` layer. That creates the user, Quadlets, route, and secrets. `deploy` exits successfully with "nothing to deploy yet" while the repository has no `dev` tag.
+1. Bryan adds the workload to the manifest, adds its secrets adds its secrets file, and runs `pulumi up` on the `services` layer. That creates the user, Quadlets, route, and secrets. `deploy` exits successfully with "nothing to deploy yet" while the repository has no `dev` tag.
 2. **On a push to `main`,** CI runs tests, builds the image once, pushes it to GHCR as `sha-<full commit SHA>`, moves the `dev` tag to that commit, and calls `deploy` on the dev server.
 3. **On a push of the `dev` or `prod` tag,** CI calls `deploy` on that environment's server without building. This covers promotion (moving `prod` forward) and rollback (moving a tag back).
 4. **Without GitHub Actions,** the operator does the same by hand: `git tag -f prod <commit> && git push -f origin prod`, then `ssh app-demo-app@<prod server> deploy`.
@@ -945,7 +985,7 @@ For each first-party workload, in each environment it's enabled for:
 - **Generated Quadlets:** the main container, publishing only `127.0.0.1:<port>`, with `PORT` set, `data/` mounted at `/data`, and `EnvironmentFile=` lines for `config.env` then `runtime.env`, so a secret wins if a key appears in both. Plus a Postgres sidecar when the manifest says so, storing its files in `postgres/`, and optional health settings once health checks land.
 - **A Caddy route** to `127.0.0.1:<port>`, with basic authentication for experiments.
 - **A data directory** at `/mnt/data/<user>/`. See [Storage layout](#storage-layout).
-- **Runtime secrets** in `~/.config/secrets/runtime.env`, from `secrets/<env>/<user>.env`. See [Secrets](#secrets).
+- **Runtime secrets** in `~/.config/secrets/runtime.env`, from `secrets/<env>/<user>.env`, with the workload restarted whenever they change. See [Secrets](#secrets).
 - **Backups** on prod, including a database dump when the manifest says there's a database.
 - **Tailnet access** for CI, through a Tailscale OAuth client tagged `tag:ci`.
 - **A reusable deploy workflow.** See [The reusable workflow](#the-reusable-workflow).
@@ -960,11 +1000,12 @@ It does the following, in order, and exits non-zero with a clear message on any 
 2. Read an optional GitHub token from standard input. See [Private repositories](#private-repositories).
 3. Resolve the environment tag to a commit with `git ls-remote`. If the tag doesn't exist, exit successfully with "nothing to deploy yet."
 4. Shallow-clone that commit and read `deploy/<env>.env`. Git, rather than GitHub's raw-file URLs, keeps the script working against Forgejo or Codeberg.
-5. Compare the commit, a hash of the configuration, and a hash of the installed Quadlets to the last successful deploy's record. If all match, exit successfully without changes.
-6. Write a Quadlet drop-in setting `Image=<image>:sha-<commit>`, and write the configuration to `~/.config/sovereign-stack/config.env`.
-7. Pull the image, run `systemctl --user daemon-reload`, and restart the workload.
-8. Check that `http://127.0.0.1:<port>/version` reports that commit, retrying briefly.
-9. Record the deployed commit and hashes in `~/.local/state/sovereign-stack/`.
+5. Check that every name listed in `deploy/secrets.keys` is set in `~/.config/secrets/runtime.env`. If any is missing, exit with a message naming the missing keys and saying to deploy `sovereign-stack` first. Only names are compared; values are never read or printed.
+6. Compare the commit, a hash of the configuration, and a hash of the installed Quadlets to the last successful deploy's record. If all match, exit successfully without changes.
+7. Write a Quadlet drop-in setting `Image=<image>:sha-<commit>`, and write the configuration to `~/.config/sovereign-stack/config.env`.
+8. Pull the image, run `systemctl --user daemon-reload`, and restart the workload.
+9. Check that `http://127.0.0.1:<port>/version` reports that commit, retrying briefly.
+10. Record the deployed commit and hashes in `~/.local/state/sovereign-stack/`.
 
 > [!eli5] The deploy script and forced-command keys
 > Without this script, every app repository's CI would contain the same install steps: copy files, set the image, reload systemd, restart, verify. Changing a platform convention would mean editing every repository. Instead, the install logic lives once, on the server, owned by `sovereign-stack`. CI, Pulumi, and the operator all just ask the server to run it.
@@ -1011,6 +1052,8 @@ Reboots need no credentials, because images stay in the user's local image store
 `/healthz` stays required even though health checks are deferred, so enabling them later needs no workload changes.
 
 **Configuration** in `deploy/dev.env` and `deploy/prod.env`: non-secret settings only. These files are public in public repositories.
+
+**Required secret names** in `deploy/secrets.keys`: one runtime secret name per line, never values. A workload that needs no secrets omits the file.
 
 **Environment tags:** `dev`, and for apps, `prod`.
 
@@ -1117,6 +1160,7 @@ Images are tagged `sha-<full commit SHA>` and never re-tagged. With `docker/meta
 
 > [!collab] Summary of open decisions
 >
+> - Which password manager holds the root of trust.
 > - Which environment variables configure Pulumi's S3 backend for Scaleway.
 > - Where ntfy runs: ntfy.sh, or self-hosted somewhere independent of the servers it monitors.
 > - The workload removal process.
